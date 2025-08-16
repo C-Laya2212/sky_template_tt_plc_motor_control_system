@@ -34,7 +34,22 @@ module tt_um_ev_motor_control (
     // Set uio_oe to control bidirectional pins (1=output, 0=input)
     assign uio_oe = 8'b11110000;  // uio[7:4] as outputs, uio[3:0] as inputs
 
-    // Internal registers and wires
+    // GDS FIX 1: More robust reset synchronizer for post-layout timing
+    reg [3:0] reset_sync_reg;
+    wire system_reset;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            reset_sync_reg <= 4'b0000;
+        end else begin
+            reset_sync_reg <= {reset_sync_reg[2:0], 1'b1};
+        end
+    end
+    
+    // System is ready when reset chain is complete AND ena is high
+    assign system_reset = reset_sync_reg[3] & ena;
+
+    // Internal registers and wires - ALL explicitly sized for GDS
     reg [3:0] accelerator_value;
     reg [3:0] brake_value;
     reg [7:0] motor_speed;
@@ -51,191 +66,124 @@ module tt_um_ev_motor_control (
     reg motor_active;
     reg pwm_active;
 
-    // PWM and timing control
-    reg [15:0] pwm_clk_div;
-    wire pwm_clk;
-
-    // FIXED: Simplified data input control
-    reg [7:0] data_counter;
-    
-    // FIX 1: Add explicit reset synchronizer for Sky130 compatibility
-    reg [2:0] reset_sync;
-    wire internal_reset;
+    // GDS FIX 2: Simplified timing - avoid complex clock dividers in GDS
+    reg [7:0] simple_counter;
     
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            reset_sync <= 3'b000;
-        end else begin
-            reset_sync <= {reset_sync[1:0], 1'b1};
+            simple_counter <= 8'b0;
+        end else if (system_reset) begin
+            simple_counter <= simple_counter + 1'b1;
         end
     end
-    assign internal_reset = reset_sync[2];
 
     // =============================================================================
-    // DATA INPUT HANDLING - FIXED FOR SKY130 COMPATIBILITY
+    // GDS FIX 3: SIMPLIFIED DATA INPUT HANDLING
     // =============================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            accelerator_value <= 4'd0;      // Initialize to 0 for Sky130
-            brake_value <= 4'd0;            // Initialize to 0 for Sky130
-            data_counter <= 8'b0;
-        end else if (internal_reset && ena) begin
-            data_counter <= data_counter + 1;
-            
-            // FIX 2: Always update both values simultaneously to avoid race conditions
-            // Extract accelerator from upper 4 bits and brake from lower 4 bits
-            accelerator_value <= uio_in[7:4];  // Upper 4 bits = accelerator
-            brake_value <= uio_in[3:0];        // Lower 4 bits = brake
+            accelerator_value <= 4'b0000;
+            brake_value <= 4'b0000;
+        end else if (system_reset) begin
+            // Direct assignment - no complex logic
+            accelerator_value <= uio_in[7:4];
+            brake_value <= uio_in[3:0];
         end
     end
-
-    // Generate PWM clock
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            pwm_clk_div <= 16'b0;
-        end else if (internal_reset && ena) begin
-            pwm_clk_div <= pwm_clk_div + 1;
-        end
-    end
-    assign pwm_clk = pwm_clk_div[4]; // Fast PWM for visible results
 
     // =============================================================================
-    // TEMPERATURE MONITORING - Always Active
+    // GDS FIX 4: SIMPLIFIED TEMPERATURE MONITORING
     // =============================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             internal_temperature <= 7'd25; // Room temperature
             temperature_fault <= 1'b0;
-        end else if (internal_reset && ena) begin
-            // Temperature rises with motor activity
-            if (system_enabled && motor_speed > 8'd50) begin
-                if (internal_temperature < 7'd100 && pwm_clk_div[9:0] == 10'h000)
-                    internal_temperature <= internal_temperature + 1;
-            end else if (internal_temperature > 7'd25 && pwm_clk_div[9:0] == 10'h000) begin
-                internal_temperature <= internal_temperature - 1;
+        end else if (system_reset) begin
+            // Simplified temperature model for GDS reliability
+            if (system_enabled && (motor_speed > 8'd50)) begin
+                if (internal_temperature < 7'd85 && simple_counter[6:0] == 7'b0) begin
+                    internal_temperature <= internal_temperature + 1'b1;
+                end
+            end else if (internal_temperature > 7'd25 && simple_counter[6:0] == 7'b0) begin
+                internal_temperature <= internal_temperature - 1'b1;
             end
 
-            // Temperature fault detection
-            if (internal_temperature >= 7'd85) begin
-                temperature_fault <= 1'b1;
-            end else if (internal_temperature <= 7'd75) begin
-                temperature_fault <= 1'b0;
-            end
+            // Simple temperature fault detection
+            temperature_fault <= (internal_temperature >= 7'd80);
         end
     end
 
     // =============================================================================
-    // MAIN CONTROL LOGIC - FIXED FOR SKY130 COMPATIBILITY
+    // GDS FIX 5: MAIN CONTROL LOGIC - GREATLY SIMPLIFIED
     // =============================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            // FIX 3: Explicit initialization for all registers for Sky130
+            // Explicit reset for ALL registers for GDS compatibility
             system_enabled <= 1'b0;
-            motor_speed <= 8'b0;
+            motor_speed <= 8'b00000000;
             headlight_active <= 1'b0;
             horn_active <= 1'b0;
             indicator_active <= 1'b0;
             motor_active <= 1'b0;
             pwm_active <= 1'b0;
-            pwm_duty_cycle <= 8'b0;
-        end else if (internal_reset && ena) begin
+            pwm_duty_cycle <= 8'b00000000;
+        end else if (system_reset) begin
             
-            // Power control is always evaluated regardless of operation_select
+            // GDS FIX: Power control is the PRIMARY logic - always evaluated first
             system_enabled <= (power_on_plc | power_on_hmi);
             
-            // Reset all outputs when power is off
-            if (!(power_on_plc | power_on_hmi)) begin
-                headlight_active <= 1'b0;
-                horn_active <= 1'b0;
-                indicator_active <= 1'b0;
-                motor_active <= 1'b0;
-                pwm_active <= 1'b0;
-                motor_speed <= 8'b0;
-                pwm_duty_cycle <= 8'b0;
-            end else begin
-                // Only execute operations when system is powered
+            // Only proceed if system has power
+            if (power_on_plc | power_on_hmi) begin
                 case (operation_select)
-                    // =================================================================
-                    // CASE 0: POWER CONTROL (operation_select = 3'b000)
-                    // =================================================================
                     3'b000: begin
-                        // Power control is handled above - just maintain state
+                        // Power control - maintain current state
                     end
                     
-                    // =================================================================
-                    // CASE 1: HEADLIGHT CONTROL (operation_select = 3'b001)
-                    // =================================================================
                     3'b001: begin
-                        // XOR logic: only one source should control
+                        // Headlight control
                         headlight_active <= (headlight_plc ^ headlight_hmi);
                     end
                     
-                    // =================================================================
-                    // CASE 2: HORN CONTROL (operation_select = 3'b010)
-                    // =================================================================
                     3'b010: begin
-                        // XOR logic for horn control
+                        // Horn control
                         horn_active <= (horn_plc ^ horn_hmi);
                     end
                     
-                    // =================================================================
-                    // CASE 3: RIGHT INDICATOR CONTROL (operation_select = 3'b011)
-                    // =================================================================
                     3'b011: begin
-                        // XOR logic for indicator control
+                        // Right indicator control
                         indicator_active <= (right_ind_plc ^ right_ind_hmi);
                     end
                     
-                    // =================================================================
-                    // CASE 4: MOTOR SPEED CALCULATION - FIXED FOR SKY130
-                    // =================================================================
+                    // GDS FIX 6: SIMPLIFIED MOTOR SPEED CALCULATION
                     3'b100: begin
+                        motor_active <= 1'b1;
                         if (!temperature_fault) begin
-                            // FIX 4: Add explicit bounds checking for Sky130
-                            if ((accelerator_value != 4'b0) && (accelerator_value > brake_value)) begin
-                                // Use multiplication instead of shift for Sky130 compatibility
-                                motor_speed <= ((accelerator_value - brake_value) << 4);
+                            // Simplified calculation - avoid potential overflow in GDS
+                            if (accelerator_value > brake_value) begin
+                                motor_speed <= {accelerator_value - brake_value, 4'b0000}; // Multiply by 16 using concat
                             end else begin
-                                motor_speed <= 8'b0;
+                                motor_speed <= 8'b00000000;
                             end
-                            motor_active <= 1'b1;
                         end else begin
-                            // Reduce speed by 50% during overheating
+                            // Fault mode - half speed
                             motor_speed <= motor_speed >> 1;
-                            motor_active <= 1'b1;
                         end
                     end
                     
-                    // =================================================================
-                    // CASE 5: PWM GENERATION (operation_select = 3'b101)
-                    // =================================================================
+                    // GDS FIX 7: SIMPLIFIED PWM GENERATION
                     3'b101: begin
-                        if (!temperature_fault) begin
-                            // FIXED: Ensure PWM duty cycle is properly set
-                            pwm_duty_cycle <= motor_speed;
-                            pwm_active <= (motor_speed > 8'b0) ? 1'b1 : 1'b0;
-                        end else begin
-                            // Reduced PWM during fault
-                            pwm_duty_cycle <= motor_speed >> 1;
-                            pwm_active <= (motor_speed > 8'b0) ? 1'b1 : 1'b0;
-                        end
+                        pwm_duty_cycle <= motor_speed;
+                        pwm_active <= (motor_speed != 8'b00000000);
                     end
                     
-                    // =================================================================
-                    // CASE 6: TEMPERATURE MONITORING (operation_select = 3'b110)
-                    // =================================================================
                     3'b110: begin
-                        // Temperature monitoring is handled in separate always block
-                        // This case maintains current state and allows temperature readout
+                        // Temperature monitoring is handled separately
                     end
                     
-                    // =================================================================
-                    // CASE 7: SYSTEM STATUS/RESET (operation_select = 3'b111)
-                    // =================================================================
                     3'b111: begin
-                        // Reset all active states
-                        motor_speed <= 8'b0;
-                        pwm_duty_cycle <= 8'b0;
+                        // System reset
+                        motor_speed <= 8'b00000000;
+                        pwm_duty_cycle <= 8'b00000000;
                         headlight_active <= 1'b0;
                         horn_active <= 1'b0;
                         indicator_active <= 1'b0;
@@ -243,53 +191,82 @@ module tt_um_ev_motor_control (
                         pwm_active <= 1'b0;
                     end
                     
-                    // Default case: maintain current state
                     default: begin
-                        // FIX 5: Explicit default assignments for Sky130
-                        // Maintain current state for any undefined operations
+                        // Maintain state
                     end
                 endcase
+            end else begin
+                // Power off - reset all outputs immediately
+                headlight_active <= 1'b0;
+                horn_active <= 1'b0;
+                indicator_active <= 1'b0;
+                motor_active <= 1'b0;
+                pwm_active <= 1'b0;
+                motor_speed <= 8'b00000000;
+                pwm_duty_cycle <= 8'b00000000;
             end
         end
     end
 
     // =============================================================================
-    // PWM GENERATION HARDWARE - FIXED FOR SKY130
+    // GDS FIX 8: SIMPLIFIED PWM GENERATION HARDWARE
     // =============================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            pwm_counter <= 8'b0;
-        end else if (internal_reset && ena && system_enabled) begin
-            // Increment PWM counter every clock cycle for high frequency PWM
-            pwm_counter <= pwm_counter + 1;
+            pwm_counter <= 8'b00000000;
+        end else if (system_reset && system_enabled) begin
+            pwm_counter <= pwm_counter + 1'b1;
         end else if (!system_enabled) begin
-            pwm_counter <= 8'b0;
+            pwm_counter <= 8'b00000000;
         end
     end
 
     // =============================================================================
-    // OUTPUT ASSIGNMENTS - FIXED FOR SKY130 COMPATIBILITY
+    // GDS FIX 9: ROBUST OUTPUT ASSIGNMENTS
     // =============================================================================
-    wire power_status = system_enabled;
-    wire headlight_out = headlight_active & system_enabled;
-    wire horn_out = horn_active & system_enabled;
-    wire right_indicator = indicator_active & system_enabled;
     
-    // FIX 6: More robust PWM output generation for Sky130
-    wire motor_pwm = (internal_reset && system_enabled && pwm_active && (pwm_duty_cycle > 8'b0)) ? 
-                     (pwm_counter < pwm_duty_cycle) : 1'b0;
-                     
-    wire overheat_warning = temperature_fault;
-    wire [1:0] status_led = {temperature_fault, system_enabled};
-
-    // Final output assignments with explicit initialization
-    assign uo_out = internal_reset ? {status_led[1:0], overheat_warning, motor_pwm, 
-                     right_indicator, horn_out, headlight_out, power_status} : 8'b0;
+    // Individual output wires for clarity
+    wire power_status_wire;
+    wire headlight_out_wire;
+    wire horn_out_wire;
+    wire right_indicator_wire;
+    wire motor_pwm_wire;
+    wire overheat_warning_wire;
+    wire [1:0] status_led_wire;
     
-    // FIX 7: Guard output assignment
-    assign uio_out = internal_reset ? motor_speed : 8'b0;
+    // GDS-safe assignments
+    assign power_status_wire = system_reset ? system_enabled : 1'b0;
+    assign headlight_out_wire = system_reset ? (headlight_active & system_enabled) : 1'b0;
+    assign horn_out_wire = system_reset ? (horn_active & system_enabled) : 1'b0;
+    assign right_indicator_wire = system_reset ? (indicator_active & system_enabled) : 1'b0;
+    assign overheat_warning_wire = system_reset ? temperature_fault : 1'b0;
+    assign status_led_wire = system_reset ? {temperature_fault, system_enabled} : 2'b00;
+    
+    // GDS-safe PWM generation
+    assign motor_pwm_wire = (system_reset && system_enabled && pwm_active && (pwm_duty_cycle != 8'b00000000)) ? 
+                           (pwm_counter < pwm_duty_cycle) : 1'b0;
 
-    // Tie off unused input to prevent warnings
-    wire _unused = &{mode_select, motor_active, 1'b0};
+    // Final output assignments - explicit bit concatenation for GDS
+    assign uo_out[0] = power_status_wire;
+    assign uo_out[1] = headlight_out_wire;
+    assign uo_out[2] = horn_out_wire;
+    assign uo_out[3] = right_indicator_wire;
+    assign uo_out[4] = motor_pwm_wire;
+    assign uo_out[5] = overheat_warning_wire;
+    assign uo_out[6] = status_led_wire[0];
+    assign uo_out[7] = status_led_wire[1];
+    
+    // Motor speed output - individual bit assignments for GDS reliability
+    assign uio_out[0] = system_reset ? motor_speed[0] : 1'b0;
+    assign uio_out[1] = system_reset ? motor_speed[1] : 1'b0;
+    assign uio_out[2] = system_reset ? motor_speed[2] : 1'b0;
+    assign uio_out[3] = system_reset ? motor_speed[3] : 1'b0;
+    assign uio_out[4] = system_reset ? motor_speed[4] : 1'b0;
+    assign uio_out[5] = system_reset ? motor_speed[5] : 1'b0;
+    assign uio_out[6] = system_reset ? motor_speed[6] : 1'b0;
+    assign uio_out[7] = system_reset ? motor_speed[7] : 1'b0;
+
+    // Tie off unused signals to prevent warnings and floating nodes
+    wire _unused_ok = &{mode_select, 1'b0};
 
 endmodule
