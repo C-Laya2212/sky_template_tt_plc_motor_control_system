@@ -16,14 +16,22 @@ module tt_um_ev_motor_control (
     input  wire       rst_n     // reset_n - low to reset
 );
 
-    // CRITICAL FIX: Set uio_oe immediately - no logic
-    assign uio_oe = 8'b11110000;  // uio[7:4] as outputs, uio[3:0] as inputs
+    // CRITICAL FIX 1: uio_oe must be driven by a register to avoid synthesis issues
+    reg [7:0] uio_oe_reg;
+    assign uio_oe = uio_oe_reg;
 
-    // MINIMAL APPROACH: Single register for all state
-    reg [7:0] main_output_reg;
-    reg [7:0] motor_speed_reg;
+    // CRITICAL FIX 2: All outputs must be driven by registers
+    reg [7:0] uo_out_reg;
+    reg [7:0] uio_out_reg;
     
-    // Extract input signals as wires (OUTSIDE always block)
+    assign uo_out = uo_out_reg;
+    assign uio_out = uio_out_reg;
+
+    // CRITICAL FIX 3: Proper reset handling for Sky130
+    // Sky130 requires very explicit reset behavior
+    wire reset_active = !rst_n || !ena;  // Combine both reset conditions
+    
+    // Extract input signals (these are combinational)
     wire [2:0] operation_select = ui_in[2:0];
     wire power_on_plc = ui_in[3];
     wire power_on_hmi = ui_in[4];
@@ -31,49 +39,71 @@ module tt_um_ev_motor_control (
     wire [3:0] accelerator_in = uio_in[7:4];
     wire [3:0] brake_in = uio_in[3:0];
     
-    // CRITICAL FIX: Use ONLY ena and rst_n - no complex reset logic
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            // Simple reset
-            main_output_reg <= 8'b00000000;
-            motor_speed_reg <= 8'b00000000;
-        end else if (ena) begin  // CRITICAL: Use ena directly
+    // CRITICAL FIX 4: Use synchronous reset for Sky130 compatibility
+    always @(posedge clk) begin
+        if (reset_active) begin
+            // EXPLICIT reset values for Sky130 - must be very clear
+            uo_out_reg <= 8'b00000000;
+            uio_out_reg <= 8'b00000000;
+            uio_oe_reg <= 8'b11110000;  // Set I/O directions
+        end else begin
+            // CRITICAL FIX 5: Always provide default values to prevent X states
+            uo_out_reg <= 8'b00000000;  // Default state
+            uio_out_reg <= 8'b00000000;  // Default state
+            uio_oe_reg <= 8'b11110000;   // Keep I/O directions stable
             
-            // MINIMAL LOGIC: Direct response to inputs
+            // Logic only executes when system is enabled
             if (system_enabled) begin
                 case (operation_select)
                     3'b000: begin
-                        // Power mode - just show power status
-                        main_output_reg <= 8'b00000001; // Power bit on
+                        // Power mode - show power status
+                        uo_out_reg <= 8'b00000001; // Set power bit
                     end
                     
                     3'b100: begin
                         // Motor calculation mode
-                        // Simple motor speed calculation
                         if (accelerator_in > brake_in) begin
-                            motor_speed_reg <= {accelerator_in - brake_in, 4'b0000}; // *16
-                            main_output_reg <= 8'b00000001; // Show power on
+                            // Calculate motor speed: (accel - brake) * 16
+                            uio_out_reg <= {accelerator_in - brake_in, 4'b0000};
+                            uo_out_reg <= 8'b00000001; // Show power on
                         end else begin
-                            motor_speed_reg <= 8'b00000000;
-                            main_output_reg <= 8'b00000001; // Show power on
+                            uio_out_reg <= 8'b00000000; // No motor speed
+                            uo_out_reg <= 8'b00000001; // Show power on
                         end
                     end
                     
+                    3'b001: begin
+                        // Additional mode for testing
+                        uo_out_reg <= 8'b00000011; // Different pattern
+                    end
+                    
+                    3'b010: begin
+                        // Another test mode
+                        uo_out_reg <= 8'b00000101; // Different pattern
+                    end
+                    
                     default: begin
-                        // All other modes - just show power
-                        main_output_reg <= 8'b00000001;
+                        // Default case - just show power
+                        uo_out_reg <= 8'b00000001;
                     end
                 endcase
-            end else begin
-                // Power off
-                main_output_reg <= 8'b00000000;
-                motor_speed_reg <= 8'b00000000;
             end
+            // Note: if !system_enabled, we keep the default values set above
         end
     end
 
-    // DIRECT OUTPUT ASSIGNMENT - NO COMPLEX LOGIC
-    assign uo_out = main_output_reg;
-    assign uio_out = motor_speed_reg;
+    // CRITICAL FIX 6: Add some unused signal handling to prevent optimization
+    // Sometimes synthesis tools remove logic they think is unused
+    wire unused_signals = |{ui_in[7:5], uio_in[3:0]};  // Acknowledge all inputs
+    
+    // Optional: Add a simple counter for debugging connectivity
+    reg [7:0] debug_counter;
+    always @(posedge clk) begin
+        if (reset_active) begin
+            debug_counter <= 8'b00000000;
+        end else begin
+            debug_counter <= debug_counter + 1;
+        end
+    end
 
 endmodule
