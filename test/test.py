@@ -89,7 +89,7 @@ async def test_project(dut):
     dut._log.info(f"  Actual: {motor_speed}")
     dut._log.info(f"  Power: {power}")
     dut._log.info(f"  Output register: 0x{output_val:02x}")
-    dut._log.info(f"  uio_in value: 0x{dut.uio_in.value:02x}")
+    dut._log.info(f"  uio_in value: 0x{int(dut.uio_in.value):02x}")
     
     # Debug: Check internal signals if accessible
     try:
